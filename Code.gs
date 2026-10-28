@@ -5,6 +5,7 @@
  *               店長 → 在「填寫紀錄」新增一列（同店重送也新增一列，舊的保留，以最新一筆為準）。
  *               其他同事 → 在「同仁建議」新增一列（「可以放什麼」的點子，只給內部看）。
  *               DK 台灣島的客人留言（role: "message"）→ 在「門市留言」新增一列，先審再上牆。
+ *               DK 台灣島的島民角色（role: "resident"）→ 在「島民角色」一台裝置一列，角色馬上公開、暱稱先審。
  *   doGet       回傳每間門市「最新一筆有效資料」的 JSON，以門市 id 為鍵。
  *               填寫進度頁、之後的「DK 台灣島」網站都讀這裡。同仁建議的內容不會出現在這裡。
  *   setupSheet  第一次使用時，在編輯器上方選它再按「執行」一次：建立分頁、欄位標題與公式。
@@ -15,10 +16,15 @@
  *   填寫紀錄    店長的所有送出紀錄。最後一欄「不採用」打勾 = 這筆不算數（遇到亂填時用，不用刪列）。
  *   同仁建議    其他同事的點子留言。最後一欄「已看過」給你自己打勾追蹤。
  *   門市留言    台灣島上客人的留言。最後一欄「上牆」打勾 = 審核通過，出現在該門市的留言牆。
+ *   島民角色    台灣島訪客捏的氣球人，一台裝置一列。「暱稱通過」打勾才顯示暱稱；「隱藏」打勾 = 整個角色不出現。
  *
  * doPost 留言格式（台灣島送來，text/plain 的 JSON）：
  *   { role: "message", submissionId, storeId, nickname, text, deviceId, website, version }
  *   成功回 {ok:true, pending:true}；失敗回 {ok:false, message:"給客人看的說明"}。
+ *
+ * doPost 島民角色格式：
+ *   { role: "resident", submissionId, deviceId, nickname, look: {body, hat, acc, shoe}, mode, website, version }
+ *   成功回 {ok:true, id:"角色ID", nicknamePending:true/false}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
  *
  * doGet 回傳格式（欄位名稱固定；之後只會增加欄位，不會改名或刪除）：
  *   {
@@ -47,7 +53,12 @@
  *         ]
  *       },
  *       …
- *     }
+ *     },
+ *     residents: [                                        // 沒隱藏的島民，依更新時間新到舊最多 300 個
+ *       { id: "a1b2c3d4e5f6", look: {body:"k", hat:"cap", acc:"none", shoe:"#2e2b2a"},
+ *         mode: "north", nickname: "",                    // 暱稱還沒通過時是空字串
+ *         at: "2026-10-28T10:00:00+08:00" }               // 不會回傳裝置代號
+ *     ]
  *   }
  *
  * 門市清單（STORES）由 tools/build_stores.py 從 DK門市清單.json 產生，請勿手改。
@@ -60,6 +71,7 @@ var LATEST_TAB = '每店最新';
 var RECORD_TAB = '填寫紀錄';
 var SUGGESTION_TAB = '同仁建議';
 var MESSAGE_TAB = '門市留言';
+var RESIDENT_TAB = '島民角色';
 
 // 從試算表「擴充功能 → Apps Script」建立的專案會自動找到那份試算表，這裡留空即可。
 // 如果是另外建立的獨立 Apps Script 專案，請填試算表網址中 /d/ 和 /edit 之間的那串 ID。
@@ -79,15 +91,29 @@ var SUGGESTION_HEADERS = ['提交編號','送出時間','稱呼','相關門市ID
 var SUGGESTION = {submissionId:0, submittedAt:1, name:2, storeId:3, storeName:4, idea:5, version:6, done:7};
 var MESSAGE_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','暱稱','留言','版本','上牆'];
 var MESSAGE = {submissionId:0, submittedAt:1, storeId:2, storeName:3, nickname:4, text:5, version:6, approved:7};
+var RESIDENT_HEADERS = ['角色ID','建立時間','更新時間','裝置代號','暱稱','身體','帽子','配件','鞋色','移動模式','版本','暱稱通過','隱藏'];
+var RESIDENT = {id:0, createdAt:1, updatedAt:2, deviceId:3, nickname:4, body:5, hat:6, acc:7, shoe:8, mode:9, version:10, nicknameApproved:11, hidden:12};
 
-// 字數上限，要和 form.js 的 LIMITS 一致（nickname、message 是台灣島的留言）。
-var LIMITS = {managerName:20, quote:40, productName:40, reason:40, staffName:20, idea:200, nickname:12, message:60};
+// 字數上限，要和 form.js 的 LIMITS 一致（nickname、message 是台灣島的留言，residentName 是島民暱稱）。
+var LIMITS = {managerName:20, quote:40, productName:40, reason:40, staffName:20, idea:200, nickname:12, message:60, residentName:10};
 var MESSAGE_MIN_CHARS = 2;
 var MESSAGE_WALL_SIZE = 12;          // 每間店最多回傳幾則上牆留言
 var MESSAGE_COOLDOWN_SECONDS = 30;   // 同一台裝置多久能再留一則
 var DEFAULT_NICKNAME = '路過的客人';
 // 留言裡出現網址就擋掉（比對前先把全形字轉半形，避免「ｗｗｗ．」繞過）。
 var LINK_PATTERN = /(https?:\/\/|www\.|\.(com|tw|net|org|io|me|cc|co|ly|gl|info|biz|xyz|app|shop|link|top|site|online)\b)/i;
+
+// 島民角色的固定選項（要和台灣島的捏角色畫面一致）。
+var RESIDENT_LOOK = {
+  body:['d','k','e','c'],
+  hat:['none','cap','beanie','straw','crown'],
+  acc:['none','backpack','scarf','glasses'],
+  shoe:['#2e2b2a','#f2efe8','#e2cba6','#8B2332','#9b9a98','#9a86c6','#5b80b8','#f1b6c4']
+};
+var RESIDENT_MODES = ['loop','north','central','south','east','street','mountain'];
+var RESIDENT_LIMIT = 300;            // doGet 最多回傳幾個島民
+var RESIDENT_COOLDOWN_SECONDS = 30;  // 同一台裝置多久能再存一次角色
+var SUBMISSION_MEMORY_SECONDS = 21600;  // 島民角色沒有提交編號欄，用快取記住 6 小時內的提交結果來防重送
 
 // 從貼上的文字找出 DK 官網商品頁編號。規則要和 form.js 的 SALE_PAGE_PATTERN 一致。
 var SALE_PAGE_PATTERN = /dk-shoes\.com\.tw\/(?:[^\s?#]*?\/)?SalePage\/Index\/(\d{1,12})/i;
@@ -184,12 +210,18 @@ function doPost(event) {
     try { data = JSON.parse(raw); } catch (_) { publicError_('資料格式不正確，請重新整理後再試。'); }
     // 隱藏欄位被填 = 機器人，假裝成功但不寫入。
     if (data && typeof data.website === 'string' && data.website) {
-      return jsonResponse_(data.role === 'message' ? {ok:true, pending:true} : {ok:true});
+      if (data.role === 'message') return jsonResponse_({ok:true, pending:true});
+      if (data.role === 'resident') {
+        var botDevice = typeof data.deviceId === 'string' && /^[A-Za-z0-9_-]{16,40}$/.test(data.deviceId);
+        return jsonResponse_({ok:true, id:botDevice ? residentId_(data.deviceId) : '', nicknamePending:false});
+      }
+      return jsonResponse_({ok:true});
     }
     var valid = validatePayload_(data);
     lock = LockService.getScriptLock();
     if (!lock.tryLock(10000)) publicError_('目前送出的人比較多，請稍後再按一次。');
-    var result = valid.role === 'message' ? appendMessage_(valid)
+    var result = valid.role === 'resident' ? saveResident_(valid)
+      : valid.role === 'message' ? appendMessage_(valid)
       : valid.role === 'staff' ? appendSuggestion_(valid) : appendRecord_(valid);
     return jsonResponse_(result);
   } catch (error) {
@@ -200,7 +232,7 @@ function doPost(event) {
   }
 }
 
-// 在試算表裡手動修改（例如勾「不採用」「上牆」）時清掉快取，讓網站馬上讀到新資料。
+// 在試算表裡手動修改（例如勾「不採用」「上牆」「暱稱通過」「隱藏」）時清掉快取，讓網站馬上讀到新資料。
 // onEdit 只在「從試算表擴充功能建立」的專案有效；獨立專案改由 setupSheet 建立的觸發條件呼叫 clearCacheOnEdit。
 function onEdit() {
   clearCache_();
@@ -218,6 +250,29 @@ function validatePayload_(data) {
   var submissionId = cleanText_(data.submissionId, 80, true, '提交編號');
   if (!/^[A-Za-z0-9_-]{16,80}$/.test(submissionId)) publicError_('提交編號不正確，請重新整理後再試。');
   var version = cleanText_(data.version, 40, false, '版本');
+
+  if (data.role === 'resident') {
+    var residentDevice = cleanText_(data.deviceId, 40, true, '裝置識別碼');
+    if (!/^[A-Za-z0-9_-]{16,40}$/.test(residentDevice)) publicError_('裝置識別碼不正確，請重新整理後再試。');
+    var residentName = cleanText_(data.nickname, LIMITS.residentName, false, '暱稱');
+    if (LINK_PATTERN.test(residentName.normalize('NFKC'))) publicError_('暱稱不能放網址喔，換一個名字吧！');
+    var look = data.look;
+    if (!look || typeof look !== 'object' || Array.isArray(look)) publicError_('角色造型資料不完整，請重新整理後再試。');
+    return {
+      role:'resident',
+      submissionId:submissionId,
+      deviceId:residentDevice,
+      nickname:residentName,
+      look:{
+        body:pickOption_(look.body, RESIDENT_LOOK.body, '身體'),
+        hat:pickOption_(look.hat, RESIDENT_LOOK.hat, '帽子'),
+        acc:pickOption_(look.acc, RESIDENT_LOOK.acc, '配件'),
+        shoe:pickOption_(look.shoe, RESIDENT_LOOK.shoe, '鞋子顏色')
+      },
+      mode:pickOption_(data.mode, RESIDENT_MODES, '移動方式'),
+      version:version
+    };
+  }
 
   if (data.role === 'message') {
     var wallStore = findStore_(cleanText_(data.storeId, 20, true, '門市'));
@@ -292,6 +347,19 @@ function findStore_(id) {
   return null;
 }
 
+/** 只接受清單裡的值（不分大小寫，例如鞋色 #8b2332），回傳清單裡的寫法。 */
+function pickOption_(value, options, label) {
+  var text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  for (var i = 0; i < options.length; i++) if (options[i].toLowerCase() === text) return options[i];
+  publicError_('「' + label + '」的選項不正確，請重新整理後再選一次。');
+}
+
+/** 角色ID = deviceId 的 SHA-256 十六進位前 12 碼；台灣島用同樣算法認出「我的角色」。 */
+function residentId_(deviceId) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, deviceId, Utilities.Charset.UTF_8);
+  return bytes.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('').slice(0, 12);
+}
+
 
 /* ---------- 寫入 ---------- */
 
@@ -327,6 +395,45 @@ function appendMessage_(data) {
   return {ok:true, pending:true};
 }
 
+/**
+ * 島民角色：一台裝置一列，已經有就更新同一列。角色馬上公開（所以要清快取），
+ * 暱稱有改就取消「暱稱通過」，等審核後才顯示。「隱藏」維持原狀，不會因為重存而解除。
+ */
+function saveResident_(data) {
+  var cache = CacheService.getScriptCache();
+  var submissionKey = 'resident-submission:' + data.submissionId;
+  var remembered = cache.get(submissionKey);
+  if (remembered) return JSON.parse(remembered);
+  var cooldownKey = 'resident-device:' + data.deviceId;
+  if (cache.get(cooldownKey)) publicError_('存太快了，休息一下再改吧！');
+
+  var sheet = openTab_(RESIDENT_TAB, RESIDENT_HEADERS);
+  var id = residentId_(data.deviceId);
+  var now = new Date();
+  var last = sheet.getLastRow();
+  var rows = last > 1 ? sheet.getRange(2, 1, last - 1, RESIDENT_HEADERS.length).getValues() : [];
+  var index = -1;
+  for (var i = rows.length - 1; i >= 0; i--) if (String(rows[i][RESIDENT.deviceId]) === data.deviceId) { index = i; break; }
+
+  var approved = false;
+  var fields = [now, data.deviceId, data.nickname, data.look.body, data.look.hat, data.look.acc, data.look.shoe, data.mode, data.version];
+  if (index === -1) {
+    appendRow_(sheet, [id, now].concat(fields), 2);
+  } else {
+    var row = index + 2;
+    var old = rows[index];
+    approved = old[RESIDENT.nicknameApproved] === true && cellText_(old[RESIDENT.nickname]) === data.nickname;
+    writeCells_(sheet.getRange(row, RESIDENT.updatedAt + 1, 1, fields.length), fields);
+    if (!approved && old[RESIDENT.nicknameApproved] === true) sheet.getRange(row, RESIDENT.nicknameApproved + 1).setValue(false);
+    SpreadsheetApp.flush();
+  }
+  clearCache_();
+  cache.put(cooldownKey, '1', RESIDENT_COOLDOWN_SECONDS);
+  var result = {ok:true, id:id, nicknamePending:!!data.nickname && !approved};
+  cache.put(submissionKey, JSON.stringify(result), SUBMISSION_MEMORY_SECONDS);
+  return result;
+}
+
 /** 同一個提交編號 = 手機網路不穩重送，不重複新增。 */
 function hasSubmission_(sheet, submissionId) {
   var last = sheet.getLastRow();
@@ -336,16 +443,19 @@ function hasSubmission_(sheet, submissionId) {
   return false;
 }
 
-/** 在最後新增一列；最後一欄（不採用／已看過／上牆）放一個未勾選的核取方塊。 */
-function appendRow_(sheet, row) {
+/** 在最後新增一列；後面接著放未勾選的核取方塊（不採用／已看過／上牆，島民角色是暱稱通過＋隱藏兩格）。 */
+function appendRow_(sheet, row, checkboxes) {
   var target = sheet.getLastRow() + 1;
   if (target > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 100);
-  var range = sheet.getRange(target, 1, 1, row.length);
-  // 先設成純文字格式，避免「10/28」「001」這類內容被試算表自動轉成日期或數字。
-  range.setNumberFormats([row.map(function (value) { return value instanceof Date ? 'yyyy-mm-dd hh:mm:ss' : '@'; })]);
-  range.setValues([row.map(safeCellText_)]);
-  sheet.getRange(target, row.length + 1).insertCheckboxes();
+  writeCells_(sheet.getRange(target, 1, 1, row.length), row);
+  sheet.getRange(target, row.length + 1, 1, checkboxes || 1).insertCheckboxes();
   SpreadsheetApp.flush();
+}
+
+/** 寫一列資料。先設成純文字格式，避免「10/28」「001」這類內容被試算表自動轉成日期或數字。 */
+function writeCells_(range, values) {
+  range.setNumberFormats([values.map(function (value) { return value instanceof Date ? 'yyyy-mm-dd hh:mm:ss' : '@'; })]);
+  range.setValues([values.map(safeCellText_)]);
 }
 
 var openedBook_ = null;
@@ -426,8 +536,30 @@ function buildLatest_() {
     total:STORES.length,
     filledCount:filledCount,
     suggestionCount:suggestions ? Math.max(suggestions.getLastRow() - 1, 0) : 0,
-    stores:stores
+    stores:stores,
+    residents:visibleResidents_()
   };
+}
+
+/** 沒勾「隱藏」的島民，依更新時間新到舊最多 RESIDENT_LIMIT 個。不回傳裝置代號（拿到就能改掉別人的角色）。 */
+function visibleResidents_() {
+  if (!book_().getSheetByName(RESIDENT_TAB)) return [];
+  var sheet = openTab_(RESIDENT_TAB, RESIDENT_HEADERS);
+  var last = sheet.getLastRow();
+  var rows = last > 1 ? sheet.getRange(2, 1, last - 1, RESIDENT_HEADERS.length).getValues() : [];
+  return rows
+    .filter(function (row) { return row[RESIDENT.hidden] !== true && row[RESIDENT.updatedAt] instanceof Date && row[RESIDENT.id]; })
+    .sort(function (a, b) { return b[RESIDENT.updatedAt] - a[RESIDENT.updatedAt]; })
+    .slice(0, RESIDENT_LIMIT)
+    .map(function (row) {
+      return {
+        id:String(row[RESIDENT.id]),
+        look:{body:String(row[RESIDENT.body]), hat:String(row[RESIDENT.hat]), acc:String(row[RESIDENT.acc]), shoe:String(row[RESIDENT.shoe])},
+        mode:String(row[RESIDENT.mode]),
+        nickname:row[RESIDENT.nicknameApproved] === true ? cellText_(row[RESIDENT.nickname]) : '',
+        at:isoTime_(row[RESIDENT.updatedAt])
+      };
+    });
 }
 
 /** 各店「上牆」有勾的留言，新到舊、每店最多 MESSAGE_WALL_SIZE 則。還沒建「門市留言」分頁時全部是空的。 */
@@ -522,7 +654,8 @@ function setupSheet() {
   var logTabs = [
     [RECORD_TAB, RECORD_HEADERS, [150,150,70,110,70,100,300,200,280,260,90,60]],
     [SUGGESTION_TAB, SUGGESTION_HEADERS, [150,150,120,80,110,420,90,60]],
-    [MESSAGE_TAB, MESSAGE_HEADERS, [150,150,70,110,110,380,90,60]]
+    [MESSAGE_TAB, MESSAGE_HEADERS, [150,150,70,110,110,380,90,60]],
+    [RESIDENT_TAB, RESIDENT_HEADERS, [110,150,150,180,110,50,70,80,80,90,90,70,60], 2]
   ];
   // 新試算表預設的空白分頁（工作表1）直接改名來用。
   var names = [LATEST_TAB].concat(logTabs.map(function (tab) { return tab[0]; }));
@@ -530,7 +663,7 @@ function setupSheet() {
     return sheet.getLastRow() === 0 && names.indexOf(sheet.getName()) === -1;
   })[0];
   logTabs.forEach(function (tab) {
-    prepareLogTab_(book, tab[0], tab[1], tab[2], blank);
+    prepareLogTab_(book, tab[0], tab[1], tab[2], blank, tab[3] || 1);
     // 空白分頁已經被拿去用了，就不能再改名給下一個分頁。
     if (blank && blank.getName() === tab[0]) blank = null;
   });
@@ -543,7 +676,7 @@ function setupSheet() {
 
 /**
  * 獨立的 Apps Script 專案收不到 onEdit，改建一個「編輯試算表時」的觸發條件來清快取，
- * 這樣勾「上牆」「不採用」後網站下一次讀就看得到。第一次建立時 Google 會要求多一項授權。
+ * 這樣勾「上牆」「不採用」「暱稱通過」「隱藏」後網站下一次讀就看得到。第一次建立時 Google 會要求多一項授權。
  */
 function ensureEditTrigger_(book) {
   if (SpreadsheetApp.getActiveSpreadsheet()) return;
@@ -553,8 +686,8 @@ function ensureEditTrigger_(book) {
   if (!exists) ScriptApp.newTrigger('clearCacheOnEdit').forSpreadsheet(book).onEdit().create();
 }
 
-/** 建立（或補齊）紀錄型分頁的標題列；已經有資料時只檢查，不動資料。 */
-function prepareLogTab_(book, name, headers, widths, blank) {
+/** 建立（或補齊）紀錄型分頁的標題列；已經有資料時只檢查，不動資料。最後 checkboxes 欄是核取方塊。 */
+function prepareLogTab_(book, name, headers, widths, blank, checkboxes) {
   var sheet = book.getSheetByName(name) || (blank ? blank.setName(name) : book.insertSheet(name));
   var header = sheet.getRange(1, 1, 1, headers.length);
   if (sheet.getLastRow() > 1 && header.getDisplayValues()[0].join('\n') !== headers.join('\n')) {
@@ -565,7 +698,7 @@ function prepareLogTab_(book, name, headers, widths, blank) {
   widths.forEach(function (width, i) { sheet.setColumnWidth(i + 1, width); });
   // 既有資料列補上核取方塊驗證（不改變已勾選的值）。
   if (sheet.getLastRow() > 1) {
-    sheet.getRange(2, headers.length, sheet.getLastRow() - 1, 1)
+    sheet.getRange(2, headers.length - checkboxes + 1, sheet.getLastRow() - 1, checkboxes)
       .setDataValidation(SpreadsheetApp.newDataValidation().requireCheckbox().build());
   }
   return sheet;
