@@ -4,6 +4,7 @@
  *   doPost      填寫頁送出時呼叫。
  *               店長 → 在「填寫紀錄」新增一列（同店重送也新增一列，舊的保留，以最新一筆為準）。
  *               其他同事 → 在「同仁建議」新增一列（「可以放什麼」的點子，只給內部看）。
+ *               DK 台灣島的客人留言（role: "message"）→ 在「門市留言」新增一列，先審再上牆。
  *   doGet       回傳每間門市「最新一筆有效資料」的 JSON，以門市 id 為鍵。
  *               填寫進度頁、之後的「DK 台灣島」網站都讀這裡。同仁建議的內容不會出現在這裡。
  *   setupSheet  第一次使用時，在編輯器上方選它再按「執行」一次：建立分頁、欄位標題與公式。
@@ -13,6 +14,11 @@
  *   每店最新    61 間門市各一列，公式自動帶出每店最新一筆，不用手動維護（請勿手改）。
  *   填寫紀錄    店長的所有送出紀錄。最後一欄「不採用」打勾 = 這筆不算數（遇到亂填時用，不用刪列）。
  *   同仁建議    其他同事的點子留言。最後一欄「已看過」給你自己打勾追蹤。
+ *   門市留言    台灣島上客人的留言。最後一欄「上牆」打勾 = 審核通過，出現在該門市的留言牆。
+ *
+ * doPost 留言格式（台灣島送來，text/plain 的 JSON）：
+ *   { role: "message", submissionId, storeId, nickname, text, deviceId, website, version }
+ *   成功回 {ok:true, pending:true}；失敗回 {ok:false, message:"給客人看的說明"}。
  *
  * doGet 回傳格式（欄位名稱固定；之後只會增加欄位，不會改名或刪除）：
  *   {
@@ -35,7 +41,10 @@
  *           salePageId: "10737417",                                     // 同上
  *           reason: "…"
  *         },
- *         submissionCount: 2                              // 這間店的有效送出次數
+ *         submissionCount: 2,                             // 這間店的有效送出次數
+ *         messages: [                                     // 已上牆的留言，新到舊最多 12 則；沒有為 []
+ *           { nickname: "小明", text: "…", at: "2026-10-28T10:00:00+08:00" }
+ *         ]
  *       },
  *       …
  *     }
@@ -50,23 +59,35 @@ var BRAND_COLOR = '#8B2332';
 var LATEST_TAB = '每店最新';
 var RECORD_TAB = '填寫紀錄';
 var SUGGESTION_TAB = '同仁建議';
+var MESSAGE_TAB = '門市留言';
 
 // 從試算表「擴充功能 → Apps Script」建立的專案會自動找到那份試算表，這裡留空即可。
 // 如果是另外建立的獨立 Apps Script 專案，請填試算表網址中 /d/ 和 /edit 之間的那串 ID。
 var SPREADSHEET_ID = '';
 
 // 網站讀取的 JSON 會快取 5 分鐘，減少每次都讀試算表；有人送出或手動改試算表時會立刻清掉。
+// 單一快取值有 100KB 上限，留言多了會超過，所以切成多段存。
 var CACHE_KEY = 'latest:' + SCHEMA;
 var CACHE_SECONDS = 300;
+var CACHE_CHUNK_CHARS = 30000;
+var CACHE_MAX_CHUNKS = 20;
 
 // 欄位順序 = 分頁的欄位順序。改欄位時要同步改 setupSheet 裡「每店最新」的公式。
 var RECORD_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','縣市','店長稱呼','店長的一句話','推薦商品','商品網址','推薦理由','版本','不採用'];
 var RECORD = {submissionId:0, submittedAt:1, storeId:2, storeName:3, city:4, managerName:5, quote:6, productName:7, productUrl:8, reason:9, version:10, excluded:11};
 var SUGGESTION_HEADERS = ['提交編號','送出時間','稱呼','相關門市ID','相關門市名稱','點子','版本','已看過'];
 var SUGGESTION = {submissionId:0, submittedAt:1, name:2, storeId:3, storeName:4, idea:5, version:6, done:7};
+var MESSAGE_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','暱稱','留言','版本','上牆'];
+var MESSAGE = {submissionId:0, submittedAt:1, storeId:2, storeName:3, nickname:4, text:5, version:6, approved:7};
 
-// 字數上限，要和 form.js 的 LIMITS 一致。
-var LIMITS = {managerName:20, quote:40, productName:40, reason:40, staffName:20, idea:200};
+// 字數上限，要和 form.js 的 LIMITS 一致（nickname、message 是台灣島的留言）。
+var LIMITS = {managerName:20, quote:40, productName:40, reason:40, staffName:20, idea:200, nickname:12, message:60};
+var MESSAGE_MIN_CHARS = 2;
+var MESSAGE_WALL_SIZE = 12;          // 每間店最多回傳幾則上牆留言
+var MESSAGE_COOLDOWN_SECONDS = 30;   // 同一台裝置多久能再留一則
+var DEFAULT_NICKNAME = '路過的客人';
+// 留言裡出現網址就擋掉（比對前先把全形字轉半形，避免「ｗｗｗ．」繞過）。
+var LINK_PATTERN = /(https?:\/\/|www\.|\.(com|tw|net|org|io|me|cc|co|ly|gl|info|biz|xyz|app|shop|link|top|site|online)\b)/i;
 
 // 從貼上的文字找出 DK 官網商品頁編號。規則要和 form.js 的 SALE_PAGE_PATTERN 一致。
 var SALE_PAGE_PATTERN = /dk-shoes\.com\.tw\/(?:[^\s?#]*?\/)?SalePage\/Index\/(\d{1,12})/i;
@@ -142,11 +163,10 @@ var STORES = [
 
 function doGet() {
   try {
-    var cache = CacheService.getScriptCache();
-    var json = cache.get(CACHE_KEY);
+    var json = readCache_();
     if (!json) {
       json = JSON.stringify(buildLatest_());
-      try { cache.put(CACHE_KEY, json, CACHE_SECONDS); } catch (_) { /* 超過快取大小就不快取 */ }
+      writeCache_(json);
     }
     return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
@@ -163,11 +183,14 @@ function doPost(event) {
     var data;
     try { data = JSON.parse(raw); } catch (_) { publicError_('資料格式不正確，請重新整理後再試。'); }
     // 隱藏欄位被填 = 機器人，假裝成功但不寫入。
-    if (data && typeof data.website === 'string' && data.website) return jsonResponse_({ok:true});
+    if (data && typeof data.website === 'string' && data.website) {
+      return jsonResponse_(data.role === 'message' ? {ok:true, pending:true} : {ok:true});
+    }
     var valid = validatePayload_(data);
     lock = LockService.getScriptLock();
     if (!lock.tryLock(10000)) publicError_('目前送出的人比較多，請稍後再按一次。');
-    var result = valid.role === 'staff' ? appendSuggestion_(valid) : appendRecord_(valid);
+    var result = valid.role === 'message' ? appendMessage_(valid)
+      : valid.role === 'staff' ? appendSuggestion_(valid) : appendRecord_(valid);
     return jsonResponse_(result);
   } catch (error) {
     if (!error.publicMessage) console.error(error);
@@ -177,9 +200,14 @@ function doPost(event) {
   }
 }
 
-// 在試算表裡手動修改（例如勾「不採用」）時清掉快取，讓網站馬上讀到新資料。
+// 在試算表裡手動修改（例如勾「不採用」「上牆」）時清掉快取，讓網站馬上讀到新資料。
+// onEdit 只在「從試算表擴充功能建立」的專案有效；獨立專案改由 setupSheet 建立的觸發條件呼叫 clearCacheOnEdit。
 function onEdit() {
-  CacheService.getScriptCache().remove(CACHE_KEY);
+  clearCache_();
+}
+
+function clearCacheOnEdit() {
+  clearCache_();
 }
 
 
@@ -190,6 +218,26 @@ function validatePayload_(data) {
   var submissionId = cleanText_(data.submissionId, 80, true, '提交編號');
   if (!/^[A-Za-z0-9_-]{16,80}$/.test(submissionId)) publicError_('提交編號不正確，請重新整理後再試。');
   var version = cleanText_(data.version, 40, false, '版本');
+
+  if (data.role === 'message') {
+    var wallStore = findStore_(cleanText_(data.storeId, 20, true, '門市'));
+    if (!wallStore) publicError_('找不到這間門市，請重新整理後再試。');
+    var deviceId = cleanText_(data.deviceId, 40, true, '裝置識別碼');
+    if (!/^[A-Za-z0-9_-]{16,40}$/.test(deviceId)) publicError_('裝置識別碼不正確，請重新整理後再試。');
+    var nickname = cleanText_(data.nickname, LIMITS.nickname, false, '暱稱');
+    var text = cleanText_(data.text, LIMITS.message, true, '留言');
+    if (text.length < MESSAGE_MIN_CHARS) publicError_('留言至少要 ' + MESSAGE_MIN_CHARS + ' 個字喔！');
+    if (LINK_PATTERN.test((nickname + ' ' + text).normalize('NFKC'))) publicError_('留言不能放網址喔，用文字分享你的心得吧！');
+    return {
+      role:'message',
+      submissionId:submissionId,
+      store:wallStore,
+      deviceId:deviceId,
+      nickname:nickname || DEFAULT_NICKNAME,
+      text:text,
+      version:version
+    };
+  }
 
   if (data.role === 'staff') {
     var storeId = cleanText_(data.storeId, 20, false, '相關門市');
@@ -253,7 +301,7 @@ function appendRecord_(data) {
   var now = new Date();
   appendRow_(sheet, [data.submissionId, now, data.store[0], data.store[1], data.store[2],
     data.managerName, data.quote, data.productName, data.productUrl, data.reason, data.version]);
-  CacheService.getScriptCache().remove(CACHE_KEY);
+  clearCache_();
   return {ok:true, role:'manager', storeId:data.store[0], submittedAt:isoTime_(now)};
 }
 
@@ -263,8 +311,20 @@ function appendSuggestion_(data) {
   var now = new Date();
   appendRow_(sheet, [data.submissionId, now, data.name,
     data.store ? data.store[0] : '', data.store ? data.store[1] : '', data.idea, data.version]);
-  CacheService.getScriptCache().remove(CACHE_KEY);
+  clearCache_();
   return {ok:true, role:'staff', submittedAt:isoTime_(now)};
+}
+
+/** 客人留言先存著等審核（「上牆」預設不勾），所以不用清快取。 */
+function appendMessage_(data) {
+  var sheet = openTab_(MESSAGE_TAB, MESSAGE_HEADERS);
+  if (hasSubmission_(sheet, data.submissionId)) return {ok:true, pending:true, duplicate:true};
+  var cache = CacheService.getScriptCache();
+  var cooldownKey = 'message-device:' + data.deviceId;
+  if (cache.get(cooldownKey)) publicError_('留言太快了，休息一下再留吧！');
+  appendRow_(sheet, [data.submissionId, new Date(), data.store[0], data.store[1], data.nickname, data.text, data.version]);
+  cache.put(cooldownKey, '1', MESSAGE_COOLDOWN_SECONDS);
+  return {ok:true, pending:true};
 }
 
 /** 同一個提交編號 = 手機網路不穩重送，不重複新增。 */
@@ -276,7 +336,7 @@ function hasSubmission_(sheet, submissionId) {
   return false;
 }
 
-/** 在最後新增一列；最後一欄（不採用／已看過）放一個未勾選的核取方塊。 */
+/** 在最後新增一列；最後一欄（不採用／已看過／上牆）放一個未勾選的核取方塊。 */
 function appendRow_(sheet, row) {
   var target = sheet.getLastRow() + 1;
   if (target > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 100);
@@ -288,11 +348,17 @@ function appendRow_(sheet, row) {
   SpreadsheetApp.flush();
 }
 
+var openedBook_ = null;
+
+/** 同一次執行只開一次試算表（openById 每次要花一點時間）。 */
 function book_() {
-  var book = SpreadsheetApp.getActiveSpreadsheet();
-  if (book) return book;
-  if (!SPREADSHEET_ID) throw new Error('找不到試算表：請在程式開頭的 SPREADSHEET_ID 填入試算表 ID。');
-  return SpreadsheetApp.openById(SPREADSHEET_ID);
+  if (openedBook_) return openedBook_;
+  openedBook_ = SpreadsheetApp.getActiveSpreadsheet();
+  if (!openedBook_) {
+    if (!SPREADSHEET_ID) throw new Error('找不到試算表：請在程式開頭的 SPREADSHEET_ID 填入試算表 ID。');
+    openedBook_ = SpreadsheetApp.openById(SPREADSHEET_ID);
+  }
+  return openedBook_;
 }
 
 function openTab_(name, headers) {
@@ -325,6 +391,7 @@ function buildLatest_() {
     if (!latest[storeId] || time >= latest[storeId][RECORD.submittedAt]) latest[storeId] = row;
   });
 
+  var walls = approvedMessages_();
   var stores = {};
   var filledCount = 0;
   STORES.forEach(function (store) {
@@ -346,7 +413,8 @@ function buildLatest_() {
         salePageId:saleMatch ? saleMatch[1] : '',
         reason:cellText_(row[RECORD.reason])
       } : null,
-      submissionCount:counts[store[0]] || 0
+      submissionCount:counts[store[0]] || 0,
+      messages:walls[store[0]] || []
     };
   });
 
@@ -360,6 +428,31 @@ function buildLatest_() {
     suggestionCount:suggestions ? Math.max(suggestions.getLastRow() - 1, 0) : 0,
     stores:stores
   };
+}
+
+/** 各店「上牆」有勾的留言，新到舊、每店最多 MESSAGE_WALL_SIZE 則。還沒建「門市留言」分頁時全部是空的。 */
+function approvedMessages_() {
+  var walls = {};
+  if (!book_().getSheetByName(MESSAGE_TAB)) return walls;
+  var sheet = openTab_(MESSAGE_TAB, MESSAGE_HEADERS);
+  var last = sheet.getLastRow();
+  var rows = last > 1 ? sheet.getRange(2, 1, last - 1, MESSAGE_HEADERS.length).getValues() : [];
+  // 從最後一列往回讀：同一秒送出的留言，排序後也是後送的在前。
+  rows.reverse().forEach(function (row) {
+    var time = row[MESSAGE.submittedAt];
+    if (row[MESSAGE.approved] !== true || !(time instanceof Date)) return;
+    var storeId = String(row[MESSAGE.storeId]);
+    (walls[storeId] = walls[storeId] || []).push(row);
+  });
+  Object.keys(walls).forEach(function (storeId) {
+    walls[storeId] = walls[storeId]
+      .sort(function (a, b) { return b[MESSAGE.submittedAt] - a[MESSAGE.submittedAt]; })
+      .slice(0, MESSAGE_WALL_SIZE)
+      .map(function (row) {
+        return {nickname:cellText_(row[MESSAGE.nickname]), text:cellText_(row[MESSAGE.text]), at:isoTime_(row[MESSAGE.submittedAt])};
+      });
+  });
+  return walls;
 }
 
 /** 讀回儲存格文字；拿掉寫入時為了防公式而加的單引號。 */
@@ -383,6 +476,42 @@ function publicError_(message) {
 }
 
 
+/* ---------- 快取（分段存，超過 100KB 也能快取） ---------- */
+
+function cacheKeys_() {
+  var keys = [CACHE_KEY + ':n'];
+  for (var i = 0; i < CACHE_MAX_CHUNKS; i++) keys.push(CACHE_KEY + ':' + i);
+  return keys;
+}
+
+function readCache_() {
+  var cache = CacheService.getScriptCache();
+  var count = Number(cache.get(CACHE_KEY + ':n'));
+  if (!count) return null;
+  var keys = cacheKeys_().slice(1, count + 1);
+  var parts = cache.getAll(keys);
+  var json = '';
+  for (var i = 0; i < keys.length; i++) {
+    if (typeof parts[keys[i]] !== 'string') return null;  // 有一段過期就整份重算
+    json += parts[keys[i]];
+  }
+  return json;
+}
+
+function writeCache_(json) {
+  var count = Math.ceil(json.length / CACHE_CHUNK_CHARS);
+  if (count > CACHE_MAX_CHUNKS) return;
+  var values = {};
+  values[CACHE_KEY + ':n'] = String(count);
+  for (var i = 0; i < count; i++) values[CACHE_KEY + ':' + i] = json.slice(i * CACHE_CHUNK_CHARS, (i + 1) * CACHE_CHUNK_CHARS);
+  try { CacheService.getScriptCache().putAll(values, CACHE_SECONDS); } catch (_) { /* 快取失敗就下次再讀試算表 */ }
+}
+
+function clearCache_() {
+  CacheService.getScriptCache().removeAll(cacheKeys_());
+}
+
+
 /* ---------- 第一次設定：在編輯器選 setupSheet 再按「執行」 ---------- */
 
 function setupSheet() {
@@ -390,18 +519,38 @@ function setupSheet() {
   if (!STORES.length) throw new Error('門市清單是空的，請先執行 tools/build_stores.py。');
   book.setSpreadsheetTimeZone(TIME_ZONE);
 
+  var logTabs = [
+    [RECORD_TAB, RECORD_HEADERS, [150,150,70,110,70,100,300,200,280,260,90,60]],
+    [SUGGESTION_TAB, SUGGESTION_HEADERS, [150,150,120,80,110,420,90,60]],
+    [MESSAGE_TAB, MESSAGE_HEADERS, [150,150,70,110,110,380,90,60]]
+  ];
   // 新試算表預設的空白分頁（工作表1）直接改名來用。
+  var names = [LATEST_TAB].concat(logTabs.map(function (tab) { return tab[0]; }));
   var blank = book.getSheets().filter(function (sheet) {
-    return sheet.getLastRow() === 0 && [LATEST_TAB, RECORD_TAB, SUGGESTION_TAB].indexOf(sheet.getName()) === -1;
+    return sheet.getLastRow() === 0 && names.indexOf(sheet.getName()) === -1;
   })[0];
-  prepareLogTab_(book, RECORD_TAB, RECORD_HEADERS, [150,150,70,110,70,100,300,200,280,260,90,60], blank);
-  // 空白分頁已經拿去當「填寫紀錄」了，就不能再改名給「同仁建議」用。
-  if (blank && blank.getName() === RECORD_TAB) blank = null;
-  prepareLogTab_(book, SUGGESTION_TAB, SUGGESTION_HEADERS, [150,150,120,80,110,420,90,60], blank);
+  logTabs.forEach(function (tab) {
+    prepareLogTab_(book, tab[0], tab[1], tab[2], blank);
+    // 空白分頁已經被拿去用了，就不能再改名給下一個分頁。
+    if (blank && blank.getName() === tab[0]) blank = null;
+  });
   prepareLatestTab_(book);
+  ensureEditTrigger_(book);
 
-  CacheService.getScriptCache().remove(CACHE_KEY);
-  console.log('設定完成：「' + LATEST_TAB + '」「' + RECORD_TAB + '」「' + SUGGESTION_TAB + '」三個分頁都準備好了，共 ' + STORES.length + ' 間門市。');
+  clearCache_();
+  console.log('設定完成：「' + names.join('」「') + '」分頁都準備好了，共 ' + STORES.length + ' 間門市。');
+}
+
+/**
+ * 獨立的 Apps Script 專案收不到 onEdit，改建一個「編輯試算表時」的觸發條件來清快取，
+ * 這樣勾「上牆」「不採用」後網站下一次讀就看得到。第一次建立時 Google 會要求多一項授權。
+ */
+function ensureEditTrigger_(book) {
+  if (SpreadsheetApp.getActiveSpreadsheet()) return;
+  var exists = ScriptApp.getProjectTriggers().some(function (trigger) {
+    return trigger.getHandlerFunction() === 'clearCacheOnEdit';
+  });
+  if (!exists) ScriptApp.newTrigger('clearCacheOnEdit').forSpreadsheet(book).onEdit().create();
 }
 
 /** 建立（或補齊）紀錄型分頁的標題列；已經有資料時只檢查，不動資料。 */
