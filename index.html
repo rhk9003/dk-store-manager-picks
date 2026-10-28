@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#8B2332">
+  <title>店長的一句話｜DK 高博士空氣鞋</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">DK 高博士空氣鞋</span>
+    <a class="topbar-link" href="progress.html">填寫進度</a>
+  </header>
+
+  <main class="shell">
+    <section class="intro">
+      <p class="eyebrow">DK 台灣島・全台 61 間門市</p>
+      <h1>店長的一句話＋店長推薦</h1>
+      <p>官網正在籌備「DK 台灣島」互動活動頁，全台門市都會出現在島上。請店長幫自己的門市寫一句話、推薦一雙鞋；總部和門市的其他同事也歡迎留下「島上可以放什麼」的點子。大約 2 分鐘就能完成。</p>
+    </section>
+
+    <noscript><p class="notice notice-warn">這個頁面需要開啟 JavaScript 才能填寫。</p></noscript>
+    <p id="mode-note" class="notice notice-warn" hidden></p>
+
+    <form id="picks-form" novalidate>
+      <fieldset class="card">
+        <legend class="card-title"><span class="step" aria-hidden="true">1</span>你是？</legend>
+        <div class="role-options">
+          <label class="role-choice">
+            <input type="radio" name="role" value="manager">
+            <span><strong>店長</strong><small>寫門市的一句話＋推薦商品</small></span>
+          </label>
+          <label class="role-choice">
+            <input type="radio" name="role" value="staff">
+            <span><strong>其他同事</strong><small>總部、各部門、門市夥伴都可以留點子</small></span>
+          </label>
+        </div>
+      </fieldset>
+
+      <!-- 店長 -->
+      <fieldset id="manager-fields" class="role-panel" hidden disabled>
+        <legend class="sr-only">店長填寫</legend>
+        <section class="card">
+          <h2 class="card-title"><span class="step" aria-hidden="true">2</span>門市與店長的一句話</h2>
+          <div class="field">
+            <label for="storeId">門市 <span class="tag tag-required">必填</span></label>
+            <select id="storeId" name="storeId">
+              <option value="">請選擇門市</option>
+            </select>
+          </div>
+          <div id="existing-note" class="notice notice-info" hidden>
+            <p id="existing-text"></p>
+            <button type="button" id="load-existing" class="btn-secondary">帶入上次填的內容</button>
+          </div>
+          <div class="field">
+            <label for="managerName">店長稱呼 <span class="tag">選填</span></label>
+            <input id="managerName" name="managerName" type="text" autocomplete="nickname" placeholder="例如：阿凱店長、小美">
+            <p class="hint">可以用暱稱，會公開顯示在官網上，請不要寫全名或電話。</p>
+          </div>
+          <div class="field">
+            <label for="quote">店長的一句話 <span class="tag tag-required">必填</span></label>
+            <textarea id="quote" name="quote" rows="2" placeholder="例如：走一整天也不累，來店裡試穿就知道！"></textarea>
+            <p class="counter" data-count-for="quote" aria-live="polite"></p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2 class="card-title"><span class="step" aria-hidden="true">3</span>店長推薦</h2>
+          <div class="field">
+            <label for="productName">推薦商品名稱 <span class="tag tag-required">必填</span></label>
+            <input id="productName" name="productName" type="text" placeholder="例如：空氣鞋 運動休閒鞋 黑色">
+            <p class="counter" data-count-for="productName" aria-live="polite"></p>
+          </div>
+          <div class="field">
+            <label for="productUrl">官網商品頁網址 <span class="tag">選填</span></label>
+            <input id="productUrl" name="productUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://www.dk-shoes.com.tw/SalePage/Index/…">
+            <p id="url-status" class="hint" aria-live="polite"></p>
+          </div>
+          <div class="field">
+            <label for="reason">推薦理由 <span class="tag tag-required">必填</span></label>
+            <input id="reason" name="reason" type="text" placeholder="例如：鞋墊超軟，久站的客人都回購">
+            <p class="counter" data-count-for="reason" aria-live="polite"></p>
+          </div>
+        </section>
+
+        <section class="card preview" aria-label="島上顯示預覽">
+          <h2 class="preview-title">島上大概會長這樣</h2>
+          <div class="bubble">
+            <p class="bubble-store" id="preview-store"></p>
+            <p class="bubble-quote" id="preview-quote"></p>
+            <p class="bubble-manager" id="preview-manager"></p>
+          </div>
+          <div class="pick">
+            <span class="pick-label">店長推薦</span>
+            <p class="pick-name" id="preview-product"></p>
+            <p class="pick-reason" id="preview-reason"></p>
+          </div>
+        </section>
+      </fieldset>
+
+      <!-- 其他同事 -->
+      <fieldset id="staff-fields" class="role-panel" hidden disabled>
+        <legend class="sr-only">其他同事填寫</legend>
+        <section class="card">
+          <h2 class="card-title"><span class="step" aria-hidden="true">2</span>你覺得島上可以放什麼？</h2>
+          <p class="card-note">不在門市的同事也歡迎填，不一定要跟某間門市有關。任何點子都可以：某間店可以放的內容、小遊戲、想推薦的鞋、門市的小故事……這些點子只有內部看得到，不會公開在官網。</p>
+          <div class="field">
+            <label for="staffName">你的稱呼 <span class="tag">選填</span></label>
+            <input id="staffName" name="staffName" type="text" autocomplete="nickname" placeholder="例如：電商部 阿凱、頂好店 小美">
+          </div>
+          <div class="field">
+            <label for="relatedStoreId">跟哪間門市有關？ <span class="tag">選填</span></label>
+            <select id="relatedStoreId" name="relatedStoreId">
+              <option value="">不限門市（整座島）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="idea">你的點子 <span class="tag tag-required">必填</span></label>
+            <textarea id="idea" name="idea" rows="5" placeholder="例如：頂好店可以放一個「量腳型」的小遊戲，量完推薦適合的鞋款"></textarea>
+            <p class="counter" data-count-for="idea" aria-live="polite"></p>
+          </div>
+        </section>
+      </fieldset>
+
+      <div class="hp" aria-hidden="true">
+        <label>網站 <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+      </div>
+
+      <section id="submit-card" class="card submit-card" hidden>
+        <p id="submit-note" class="submit-note"></p>
+        <button type="submit" id="submit-button" class="btn-primary" disabled>送出</button>
+        <div id="status" class="status" role="status" tabindex="-1"></div>
+        <p id="draft-note" class="draft-note">填到一半的內容會自動存在這支手機。</p>
+      </section>
+    </form>
+
+    <footer class="page-footer">
+      <a href="progress.html">看各店填寫進度 →</a>
+    </footer>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="stores.js"></script>
+  <script src="form.js"></script>
+</body>
+</html>

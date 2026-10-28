@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#8B2332">
+  <title>填寫進度｜店長的一句話</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">DK 高博士空氣鞋</span>
+    <a class="topbar-link" href="index.html">去填寫</a>
+  </header>
+
+  <main class="shell shell-wide">
+    <section class="intro">
+      <p class="eyebrow">店長的一句話＋店長推薦</p>
+      <h1>各門市填寫進度</h1>
+    </section>
+
+    <noscript><p class="notice notice-warn">這個頁面需要開啟 JavaScript 才能顯示。</p></noscript>
+    <p id="page-note" class="notice" hidden></p>
+
+    <section class="card summary" aria-live="polite">
+      <div class="summary-numbers">
+        <span class="summary-count" id="summary-count">–</span>
+        <span class="summary-total" id="summary-total">/ – 間已填</span>
+        <span class="summary-percent" id="summary-percent"></span>
+      </div>
+      <div class="bar" role="progressbar" aria-label="已填門市比例" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar">
+        <div class="bar-fill" id="bar-fill"></div>
+      </div>
+      <p class="summary-meta" id="summary-meta">讀取中…</p>
+      <div class="summary-actions">
+        <button type="button" class="btn-secondary" id="refresh">重新整理</button>
+        <button type="button" class="btn-secondary" id="copy-missing">複製未填名單</button>
+      </div>
+    </section>
+
+    <div class="filters" role="group" aria-label="篩選">
+      <button type="button" class="filter" data-filter="all" aria-pressed="true">全部</button>
+      <button type="button" class="filter" data-filter="missing" aria-pressed="false">未填</button>
+      <button type="button" class="filter" data-filter="filled" aria-pressed="false">已填</button>
+    </div>
+
+    <div id="board"></div>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="stores.js"></script>
+  <script src="progress.js"></script>
+</body>
+</html>
