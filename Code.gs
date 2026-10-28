@@ -4,8 +4,9 @@
  *   doPost      填寫頁送出時呼叫。
  *               店長 → 在「填寫紀錄」新增一列（同店重送也新增一列，舊的保留，以最新一筆為準）。
  *               其他同事 → 在「同仁建議」新增一列（「可以放什麼」的點子，只給內部看）。
- *               DK 台灣島的客人留言（role: "message"）→ 在「門市留言」新增一列，先審再上牆。
- *               DK 台灣島的島民角色（role: "resident"）→ 在「島民角色」一台裝置一列，角色馬上公開、暱稱先審。
+ *               DK 台灣島的客人留言（role: "message"）→ 在「門市留言」新增一列，通過文字規則就直接公開。
+ *               DK 台灣島的島民角色（role: "resident"）→ 在「島民角色」一台裝置一列，角色與暱稱直接公開。
+ *               留言與暱稱都要過 publicText_ 的文字規則（擋網址、程式碼、帳號、電話、洗版、禁用字）。
  *   doGet       回傳每間門市「最新一筆有效資料」的 JSON，以門市 id 為鍵。
  *               填寫進度頁、之後的「DK 台灣島」網站都讀這裡。同仁建議的內容不會出現在這裡。
  *   setupSheet  第一次使用時，在編輯器上方選它再按「執行」一次：建立分頁、欄位標題與公式。
@@ -15,16 +16,17 @@
  *   每店最新    61 間門市各一列，公式自動帶出每店最新一筆，不用手動維護（請勿手改）。
  *   填寫紀錄    店長的所有送出紀錄。最後一欄「不採用」打勾 = 這筆不算數（遇到亂填時用，不用刪列）。
  *   同仁建議    其他同事的點子留言。最後一欄「已看過」給你自己打勾追蹤。
- *   門市留言    台灣島上客人的留言。最後一欄「上牆」打勾 = 審核通過，出現在該門市的留言牆。
- *   島民角色    台灣島訪客捏的氣球人，一台裝置一列。「暱稱通過」打勾才顯示暱稱；「隱藏」打勾 = 整個角色不出現。
+ *   門市留言    台灣島上客人的留言，直接公開。最後一欄「隱藏」打勾 = 從該門市的留言牆拿掉。
+ *   島民角色    台灣島訪客捏的氣球人，一台裝置一列。「隱藏暱稱」打勾 = 只拿掉名字；「隱藏」打勾 = 整個角色不出現。
+ *   禁用字      A 欄一列一個詞，留言或暱稱裡出現就擋掉；可以自己增加。不會從網站讀到。
  *
  * doPost 留言格式（台灣島送來，text/plain 的 JSON）：
  *   { role: "message", submissionId, storeId, nickname, text, deviceId, website, version }
- *   成功回 {ok:true, pending:true}；失敗回 {ok:false, message:"給客人看的說明"}。
+ *   成功回 {ok:true, published:true, pending:false}；失敗回 {ok:false, message:"給客人看的說明"}。
  *
  * doPost 島民角色格式：
  *   { role: "resident", submissionId, deviceId, nickname, look: {body, hat, acc, shoe}, mode, website, version }
- *   成功回 {ok:true, id:"角色ID", nicknamePending:true/false}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
+ *   成功回 {ok:true, id:"角色ID", nicknamePending:false}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
  *
  * doGet 回傳格式（欄位名稱固定；之後只會增加欄位，不會改名或刪除）：
  *   {
@@ -48,7 +50,7 @@
  *           reason: "…"
  *         },
  *         submissionCount: 2,                             // 這間店的有效送出次數
- *         messages: [                                     // 已上牆的留言，新到舊最多 12 則；沒有為 []
+ *         messages: [                                     // 沒被隱藏的留言，新到舊最多 12 則；沒有為 []
  *           { nickname: "小明", text: "…", at: "2026-10-28T10:00:00+08:00" }
  *         ]
  *       },
@@ -56,7 +58,7 @@
  *     },
  *     residents: [                                        // 沒隱藏的島民，依更新時間新到舊最多 300 個
  *       { id: "a1b2c3d4e5f6", look: {body:"k", hat:"cap", acc:"none", shoe:"#2e2b2a"},
- *         mode: "north", nickname: "",                    // 暱稱還沒通過時是空字串
+ *         mode: "north", nickname: "",                    // 沒填或勾了「隱藏暱稱」時是空字串
  *         at: "2026-10-28T10:00:00+08:00" }               // 不會回傳裝置代號
  *     ]
  *   }
@@ -72,6 +74,7 @@ var RECORD_TAB = '填寫紀錄';
 var SUGGESTION_TAB = '同仁建議';
 var MESSAGE_TAB = '門市留言';
 var RESIDENT_TAB = '島民角色';
+var BANNED_TAB = '禁用字';
 
 // 從試算表「擴充功能 → Apps Script」建立的專案會自動找到那份試算表，這裡留空即可。
 // 如果是另外建立的獨立 Apps Script 專案，請填試算表網址中 /d/ 和 /edit 之間的那串 ID。
@@ -89,19 +92,43 @@ var RECORD_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','�
 var RECORD = {submissionId:0, submittedAt:1, storeId:2, storeName:3, city:4, managerName:5, quote:6, productName:7, productUrl:8, reason:9, version:10, excluded:11};
 var SUGGESTION_HEADERS = ['提交編號','送出時間','稱呼','相關門市ID','相關門市名稱','點子','版本','已看過'];
 var SUGGESTION = {submissionId:0, submittedAt:1, name:2, storeId:3, storeName:4, idea:5, version:6, done:7};
-var MESSAGE_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','暱稱','留言','版本','上牆'];
-var MESSAGE = {submissionId:0, submittedAt:1, storeId:2, storeName:3, nickname:4, text:5, version:6, approved:7};
-var RESIDENT_HEADERS = ['角色ID','建立時間','更新時間','裝置代號','暱稱','身體','帽子','配件','鞋色','移動模式','版本','暱稱通過','隱藏'];
-var RESIDENT = {id:0, createdAt:1, updatedAt:2, deviceId:3, nickname:4, body:5, hat:6, acc:7, shoe:8, mode:9, version:10, nicknameApproved:11, hidden:12};
+var MESSAGE_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','暱稱','留言','版本','隱藏'];
+var MESSAGE = {submissionId:0, submittedAt:1, storeId:2, storeName:3, nickname:4, text:5, version:6, hidden:7};
+var RESIDENT_HEADERS = ['角色ID','建立時間','更新時間','裝置代號','暱稱','身體','帽子','配件','鞋色','移動模式','版本','隱藏暱稱','隱藏'];
+var RESIDENT = {id:0, createdAt:1, updatedAt:2, deviceId:3, nickname:4, body:5, hat:6, acc:7, shoe:8, mode:9, version:10, nicknameHidden:11, hidden:12};
+// 先審制時期的舊欄名（勾 = 公開）。新版程式兩種都看得懂，setupSheet 會把舊欄轉成新欄（勾 = 隱藏）。
+var LEGACY_MESSAGE_HEADER = '上牆';
+var LEGACY_RESIDENT_HEADER = '暱稱通過';
 
 // 字數上限，要和 form.js 的 LIMITS 一致（nickname、message 是台灣島的留言，residentName 是島民暱稱）。
 var LIMITS = {managerName:20, quote:40, productName:40, reason:40, staffName:20, idea:200, nickname:12, message:60, residentName:10};
 var MESSAGE_MIN_CHARS = 2;
-var MESSAGE_WALL_SIZE = 12;          // 每間店最多回傳幾則上牆留言
+var MESSAGE_WALL_SIZE = 12;          // 每間店最多回傳幾則留言
 var MESSAGE_COOLDOWN_SECONDS = 30;   // 同一台裝置多久能再留一則
 var DEFAULT_NICKNAME = '路過的客人';
-// 留言裡出現網址就擋掉（比對前先把全形字轉半形，避免「ｗｗｗ．」繞過）。
-var LINK_PATTERN = /(https?:\/\/|www\.|\.(com|tw|net|org|io|me|cc|co|ly|gl|info|biz|xyz|app|shop|link|top|site|online)\b)/i;
+
+// 台灣島公開文字（留言、暱稱）的規則，要和台灣島前端一模一樣。比對前先轉 NFKC（全形字會變半形）。
+var INVISIBLE_CHARS = /[\u0000-\u001F\u007F​-‏‪-‮⁠-⁤﻿]/g;
+var TEXT_RULES = [
+  [/(https?:|www\.|:\/\/)/i, '不能放網址喔！'],
+  [/[a-z0-9-]+\s*(\.|。|點|dot)\s*(com|net|org|tw|io|cc|me|xyz|top|info|co|ly|gl|app|site|link|shop|live|tv)\b/i, '不能放網址喔！'],
+  [/[<>{}\[\]\x60\\=]/, '不能放程式碼或特殊符號（< > { } [ ] = 等）喔！'],
+  [/(script|javascript:|onerror|onload|eval\(|&#|%3c)/i, '不能放程式碼或特殊符號（< > { } [ ] = 等）喔！'],
+  [/@/, '不能放帳號或 email 喔！'],
+  [/(\d[\s-]?){9,}/, '為了保護個資，不能留電話或一長串數字喔！'],
+  [/(.)\1{9,}/u, '不要洗版喔！']
+];
+var NICKNAME_RULE = [/(官方|客服|店長|管理員|admin|staff)/i, '暱稱不能用官方、客服、店長等字樣喔！'];
+// 比對禁用字前，去掉所有空白、標點和符號（避免「幹 你.娘」繞過）。
+var BANNED_SQUASH = /[\s\p{P}\p{S}]/gu;
+// 「禁用字」分頁第一次建立時放的預設清單；之後以分頁內容為準。
+var DEFAULT_BANNED_WORDS = [
+  '幹你娘','幹恁娘','幹您娘','幹你老母','幹你老師','姦你娘','操你媽','操你娘','肏你','草泥馬',
+  '靠北','靠杯','靠夭','靠腰','機掰','雞掰','機歪','機八','雞八','機巴','雞巴','懶叫','懶趴','卵叫',
+  '婊子','賤人','賤貨','賤婊','破麻','白癡','白痴','智障','腦殘','低能兒','去死','死全家','垃圾人',
+  '王八蛋','狗娘養','三小','支那','娘炮','黑鬼','阿六仔','番仔',
+  'fuck','fuk','shit','bitch','asshole','bastard','cunt','motherfucker','wtf'
+];
 
 // 島民角色的固定選項（要和台灣島的捏角色畫面一致）。
 var RESIDENT_LOOK = {
@@ -210,7 +237,7 @@ function doPost(event) {
     try { data = JSON.parse(raw); } catch (_) { publicError_('資料格式不正確，請重新整理後再試。'); }
     // 隱藏欄位被填 = 機器人，假裝成功但不寫入。
     if (data && typeof data.website === 'string' && data.website) {
-      if (data.role === 'message') return jsonResponse_({ok:true, pending:true});
+      if (data.role === 'message') return jsonResponse_({ok:true, published:true, pending:false});
       if (data.role === 'resident') {
         var botDevice = typeof data.deviceId === 'string' && /^[A-Za-z0-9_-]{16,40}$/.test(data.deviceId);
         return jsonResponse_({ok:true, id:botDevice ? residentId_(data.deviceId) : '', nicknamePending:false});
@@ -232,7 +259,7 @@ function doPost(event) {
   }
 }
 
-// 在試算表裡手動修改（例如勾「不採用」「上牆」「暱稱通過」「隱藏」）時清掉快取，讓網站馬上讀到新資料。
+// 在試算表裡手動修改（例如勾「不採用」「隱藏」「隱藏暱稱」、改禁用字）時清掉快取，讓網站馬上讀到新資料。
 // onEdit 只在「從試算表擴充功能建立」的專案有效；獨立專案改由 setupSheet 建立的觸發條件呼叫 clearCacheOnEdit。
 function onEdit() {
   clearCache_();
@@ -254,8 +281,7 @@ function validatePayload_(data) {
   if (data.role === 'resident') {
     var residentDevice = cleanText_(data.deviceId, 40, true, '裝置識別碼');
     if (!/^[A-Za-z0-9_-]{16,40}$/.test(residentDevice)) publicError_('裝置識別碼不正確，請重新整理後再試。');
-    var residentName = cleanText_(data.nickname, LIMITS.residentName, false, '暱稱');
-    if (LINK_PATTERN.test(residentName.normalize('NFKC'))) publicError_('暱稱不能放網址喔，換一個名字吧！');
+    var residentName = publicText_(data.nickname, '暱稱', 0, LIMITS.residentName, true);
     var look = data.look;
     if (!look || typeof look !== 'object' || Array.isArray(look)) publicError_('角色造型資料不完整，請重新整理後再試。');
     return {
@@ -279,10 +305,8 @@ function validatePayload_(data) {
     if (!wallStore) publicError_('找不到這間門市，請重新整理後再試。');
     var deviceId = cleanText_(data.deviceId, 40, true, '裝置識別碼');
     if (!/^[A-Za-z0-9_-]{16,40}$/.test(deviceId)) publicError_('裝置識別碼不正確，請重新整理後再試。');
-    var nickname = cleanText_(data.nickname, LIMITS.nickname, false, '暱稱');
-    var text = cleanText_(data.text, LIMITS.message, true, '留言');
-    if (text.length < MESSAGE_MIN_CHARS) publicError_('留言至少要 ' + MESSAGE_MIN_CHARS + ' 個字喔！');
-    if (LINK_PATTERN.test((nickname + ' ' + text).normalize('NFKC'))) publicError_('留言不能放網址喔，用文字分享你的心得吧！');
+    var nickname = publicText_(data.nickname, '暱稱', 0, LIMITS.nickname, true);
+    var text = publicText_(data.text, '留言', MESSAGE_MIN_CHARS, LIMITS.message, false);
     return {
       role:'message',
       submissionId:submissionId,
@@ -334,6 +358,43 @@ function cleanText_(value, maxLength, required, label) {
   return text;
 }
 
+/**
+ * 台灣島公開文字（留言、暱稱）：去掉控制字元與零寬字元、前後空白，再依序檢查 TEXT_RULES、
+ * 暱稱專用規則、禁用字與字數（字數以 Unicode 字元計，表情符號算 1 個）。規則要和台灣島前端一致。
+ */
+function publicText_(value, label, min, max, isNickname) {
+  if (value === undefined || value === null) value = '';
+  if (typeof value !== 'string') publicError_('請檢查「' + label + '」的格式。');
+  var text = value.replace(INVISIBLE_CHARS, '').trim();
+  var check = text.normalize('NFKC');
+  TEXT_RULES.forEach(function (rule) { if (rule[0].test(check)) publicError_(rule[1]); });
+  if (isNickname && NICKNAME_RULE[0].test(check)) publicError_(NICKNAME_RULE[1]);
+  var squashed = check.toLowerCase().replace(BANNED_SQUASH, '');
+  if (squashed && bannedWords_().some(function (word) { return squashed.indexOf(word) !== -1; })) {
+    publicError_('有不適當的字，換個說法吧！');
+  }
+  var length = Array.from(text).length;
+  if (length < min) publicError_(label + '至少要 ' + min + ' 個字喔！');
+  if (length > max) publicError_('「' + label + '」最多 ' + max + ' 字。');
+  return text;
+}
+
+var bannedWordsCache_ = null;
+
+/** 「禁用字」分頁 A 欄（第 2 列起）。分頁還沒建立時用預設清單。比對前一樣轉小寫、去掉空白標點。 */
+function bannedWords_() {
+  if (bannedWordsCache_) return bannedWordsCache_;
+  var sheet = book_().getSheetByName(BANNED_TAB);
+  var words = DEFAULT_BANNED_WORDS;
+  if (sheet && sheet.getLastRow() > 1) {
+    words = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getDisplayValues().map(function (row) { return row[0]; });
+  }
+  bannedWordsCache_ = words
+    .map(function (word) { return String(word).normalize('NFKC').toLowerCase().replace(BANNED_SQUASH, ''); })
+    .filter(Boolean);
+  return bannedWordsCache_;
+}
+
 /** 不論貼的是手機版、帶追蹤參數或夾在分享文字裡的網址，都統一成官網商品頁的標準網址。 */
 function parseSalePage_(text) {
   if (!text) return {url:'', salePageId:''};
@@ -383,21 +444,24 @@ function appendSuggestion_(data) {
   return {ok:true, role:'staff', submittedAt:isoTime_(now)};
 }
 
-/** 客人留言先存著等審核（「上牆」預設不勾），所以不用清快取。 */
+/** 客人留言通過文字規則就直接公開（「隱藏」預設不勾），所以要清快取，讓下一個打開島的人馬上看到。 */
 function appendMessage_(data) {
-  var sheet = openTab_(MESSAGE_TAB, MESSAGE_HEADERS);
-  if (hasSubmission_(sheet, data.submissionId)) return {ok:true, pending:true, duplicate:true};
+  var tab = openTabWithLegacy_(MESSAGE_TAB, MESSAGE_HEADERS, MESSAGE.hidden, LEGACY_MESSAGE_HEADER);
+  if (hasSubmission_(tab.sheet, data.submissionId)) return {ok:true, published:true, pending:false, duplicate:true};
   var cache = CacheService.getScriptCache();
   var cooldownKey = 'message-device:' + data.deviceId;
   if (cache.get(cooldownKey)) publicError_('留言太快了，休息一下再留吧！');
-  appendRow_(sheet, [data.submissionId, new Date(), data.store[0], data.store[1], data.nickname, data.text, data.version]);
+  appendRow_(tab.sheet, [data.submissionId, new Date(), data.store[0], data.store[1], data.nickname, data.text, data.version]);
+  // 舊欄「上牆」還沒轉換時要勾起來才會公開。
+  if (tab.legacy) tab.sheet.getRange(tab.sheet.getLastRow(), MESSAGE.hidden + 1).setValue(true);
   cache.put(cooldownKey, '1', MESSAGE_COOLDOWN_SECONDS);
-  return {ok:true, pending:true};
+  clearCache_();
+  return {ok:true, published:true, pending:false};
 }
 
 /**
- * 島民角色：一台裝置一列，已經有就更新同一列。角色馬上公開（所以要清快取），
- * 暱稱有改就取消「暱稱通過」，等審核後才顯示。「隱藏」維持原狀，不會因為重存而解除。
+ * 島民角色：一台裝置一列，已經有就更新同一列。角色與暱稱都馬上公開（所以要清快取）。
+ * 「隱藏暱稱」「隱藏」都維持原狀，不會因為對方重存而解除。
  */
 function saveResident_(data) {
   var cache = CacheService.getScriptCache();
@@ -407,7 +471,8 @@ function saveResident_(data) {
   var cooldownKey = 'resident-device:' + data.deviceId;
   if (cache.get(cooldownKey)) publicError_('存太快了，休息一下再改吧！');
 
-  var sheet = openTab_(RESIDENT_TAB, RESIDENT_HEADERS);
+  var tab = openTabWithLegacy_(RESIDENT_TAB, RESIDENT_HEADERS, RESIDENT.nicknameHidden, LEGACY_RESIDENT_HEADER);
+  var sheet = tab.sheet;
   var id = residentId_(data.deviceId);
   var now = new Date();
   var last = sheet.getLastRow();
@@ -415,21 +480,18 @@ function saveResident_(data) {
   var index = -1;
   for (var i = rows.length - 1; i >= 0; i--) if (String(rows[i][RESIDENT.deviceId]) === data.deviceId) { index = i; break; }
 
-  var approved = false;
   var fields = [now, data.deviceId, data.nickname, data.look.body, data.look.hat, data.look.acc, data.look.shoe, data.mode, data.version];
   if (index === -1) {
     appendRow_(sheet, [id, now].concat(fields), 2);
+    // 舊欄「暱稱通過」還沒轉換時要勾起來暱稱才會公開。
+    if (tab.legacy) sheet.getRange(sheet.getLastRow(), RESIDENT.nicknameHidden + 1).setValue(true);
   } else {
-    var row = index + 2;
-    var old = rows[index];
-    approved = old[RESIDENT.nicknameApproved] === true && cellText_(old[RESIDENT.nickname]) === data.nickname;
-    writeCells_(sheet.getRange(row, RESIDENT.updatedAt + 1, 1, fields.length), fields);
-    if (!approved && old[RESIDENT.nicknameApproved] === true) sheet.getRange(row, RESIDENT.nicknameApproved + 1).setValue(false);
+    writeCells_(sheet.getRange(index + 2, RESIDENT.updatedAt + 1, 1, fields.length), fields);
     SpreadsheetApp.flush();
   }
   clearCache_();
   cache.put(cooldownKey, '1', RESIDENT_COOLDOWN_SECONDS);
-  var result = {ok:true, id:id, nicknamePending:!!data.nickname && !approved};
+  var result = {ok:true, id:id, nicknamePending:false};
   cache.put(submissionKey, JSON.stringify(result), SUBMISSION_MEMORY_SECONDS);
   return result;
 }
@@ -443,7 +505,7 @@ function hasSubmission_(sheet, submissionId) {
   return false;
 }
 
-/** 在最後新增一列；後面接著放未勾選的核取方塊（不採用／已看過／上牆，島民角色是暱稱通過＋隱藏兩格）。 */
+/** 在最後新增一列；後面接著放未勾選的核取方塊（不採用／已看過／隱藏，島民角色是隱藏暱稱＋隱藏兩格）。 */
 function appendRow_(sheet, row, checkboxes) {
   var target = sheet.getLastRow() + 1;
   if (target > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 100);
@@ -479,6 +541,21 @@ function openTab_(name, headers) {
   return sheet;
 }
 
+/**
+ * 有一欄可能還是先審制時期舊欄名的分頁（「上牆」「暱稱通過」：勾 = 公開）。
+ * 回傳 {sheet, legacy}；legacy 為 true 表示還沒被 setupSheet 轉換成新欄（勾 = 隱藏）。
+ */
+function openTabWithLegacy_(name, headers, index, legacyHeader) {
+  var sheet = book_().getSheetByName(name);
+  if (!sheet) throw new Error('找不到「' + name + '」分頁，請先執行 setupSheet。');
+  var header = sheet.getRange(1, 1, 1, headers.length).getDisplayValues()[0];
+  var legacy = header[index] === legacyHeader;
+  var expected = headers.slice();
+  if (legacy) expected[index] = legacyHeader;
+  if (header.join('\n') !== expected.join('\n')) throw new Error('「' + name + '」的欄位標題被改過，請還原或重新執行 setupSheet。');
+  return {sheet:sheet, legacy:legacy};
+}
+
 /** 避免留言內容被試算表當成公式執行。 */
 function safeCellText_(value) {
   return typeof value === 'string' && /^[=+\-@]/.test(value) ? "'" + value : value;
@@ -501,7 +578,7 @@ function buildLatest_() {
     if (!latest[storeId] || time >= latest[storeId][RECORD.submittedAt]) latest[storeId] = row;
   });
 
-  var walls = approvedMessages_();
+  var walls = visibleMessages_();
   var stores = {};
   var filledCount = 0;
   STORES.forEach(function (store) {
@@ -541,10 +618,14 @@ function buildLatest_() {
   };
 }
 
-/** 沒勾「隱藏」的島民，依更新時間新到舊最多 RESIDENT_LIMIT 個。不回傳裝置代號（拿到就能改掉別人的角色）。 */
+/**
+ * 沒勾「隱藏」的島民，依更新時間新到舊最多 RESIDENT_LIMIT 個；勾了「隱藏暱稱」的只拿掉名字。
+ * 不回傳裝置代號（拿到就能改掉別人的角色）。
+ */
 function visibleResidents_() {
   if (!book_().getSheetByName(RESIDENT_TAB)) return [];
-  var sheet = openTab_(RESIDENT_TAB, RESIDENT_HEADERS);
+  var tab = openTabWithLegacy_(RESIDENT_TAB, RESIDENT_HEADERS, RESIDENT.nicknameHidden, LEGACY_RESIDENT_HEADER);
+  var sheet = tab.sheet;
   var last = sheet.getLastRow();
   var rows = last > 1 ? sheet.getRange(2, 1, last - 1, RESIDENT_HEADERS.length).getValues() : [];
   return rows
@@ -556,23 +637,29 @@ function visibleResidents_() {
         id:String(row[RESIDENT.id]),
         look:{body:String(row[RESIDENT.body]), hat:String(row[RESIDENT.hat]), acc:String(row[RESIDENT.acc]), shoe:String(row[RESIDENT.shoe])},
         mode:String(row[RESIDENT.mode]),
-        nickname:row[RESIDENT.nicknameApproved] === true ? cellText_(row[RESIDENT.nickname]) : '',
+        nickname:isHidden_(row[RESIDENT.nicknameHidden], tab.legacy) ? '' : cellText_(row[RESIDENT.nickname]),
         at:isoTime_(row[RESIDENT.updatedAt])
       };
     });
 }
 
-/** 各店「上牆」有勾的留言，新到舊、每店最多 MESSAGE_WALL_SIZE 則。還沒建「門市留言」分頁時全部是空的。 */
-function approvedMessages_() {
+/** 勾選欄的意思：新欄（隱藏）勾 = 隱藏；舊欄（上牆／暱稱通過）沒勾 = 隱藏。 */
+function isHidden_(value, legacy) {
+  return legacy ? value !== true : value === true;
+}
+
+/** 各店沒被隱藏的留言，新到舊、每店最多 MESSAGE_WALL_SIZE 則。還沒建「門市留言」分頁時全部是空的。 */
+function visibleMessages_() {
   var walls = {};
   if (!book_().getSheetByName(MESSAGE_TAB)) return walls;
-  var sheet = openTab_(MESSAGE_TAB, MESSAGE_HEADERS);
+  var tab = openTabWithLegacy_(MESSAGE_TAB, MESSAGE_HEADERS, MESSAGE.hidden, LEGACY_MESSAGE_HEADER);
+  var sheet = tab.sheet;
   var last = sheet.getLastRow();
   var rows = last > 1 ? sheet.getRange(2, 1, last - 1, MESSAGE_HEADERS.length).getValues() : [];
   // 從最後一列往回讀：同一秒送出的留言，排序後也是後送的在前。
   rows.reverse().forEach(function (row) {
     var time = row[MESSAGE.submittedAt];
-    if (row[MESSAGE.approved] !== true || !(time instanceof Date)) return;
+    if (isHidden_(row[MESSAGE.hidden], tab.legacy) || !(time instanceof Date)) return;
     var storeId = String(row[MESSAGE.storeId]);
     (walls[storeId] = walls[storeId] || []).push(row);
   });
@@ -657,8 +744,18 @@ function setupSheet() {
     [MESSAGE_TAB, MESSAGE_HEADERS, [150,150,70,110,110,380,90,60]],
     [RESIDENT_TAB, RESIDENT_HEADERS, [110,150,150,180,110,50,70,80,80,90,90,70,60], 2]
   ];
+  // 先審制改成先上後審：舊欄（勾 = 公開）轉成新欄（勾 = 隱藏）。鎖住避免轉換時剛好有人留言。
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    migrateLegacyColumn_(book, MESSAGE_TAB, MESSAGE.hidden, LEGACY_MESSAGE_HEADER, MESSAGE_HEADERS[MESSAGE.hidden]);
+    migrateLegacyColumn_(book, RESIDENT_TAB, RESIDENT.nicknameHidden, LEGACY_RESIDENT_HEADER, RESIDENT_HEADERS[RESIDENT.nicknameHidden]);
+  } finally {
+    lock.releaseLock();
+  }
+
   // 新試算表預設的空白分頁（工作表1）直接改名來用。
-  var names = [LATEST_TAB].concat(logTabs.map(function (tab) { return tab[0]; }));
+  var names = [LATEST_TAB].concat(logTabs.map(function (tab) { return tab[0]; }), [BANNED_TAB]);
   var blank = book.getSheets().filter(function (sheet) {
     return sheet.getLastRow() === 0 && names.indexOf(sheet.getName()) === -1;
   })[0];
@@ -667,6 +764,7 @@ function setupSheet() {
     // 空白分頁已經被拿去用了，就不能再改名給下一個分頁。
     if (blank && blank.getName() === tab[0]) blank = null;
   });
+  prepareBannedTab_(book);
   prepareLatestTab_(book);
   ensureEditTrigger_(book);
 
@@ -675,8 +773,39 @@ function setupSheet() {
 }
 
 /**
+ * 把舊欄（「上牆」「暱稱通過」：勾 = 公開）轉成新欄（「隱藏」「隱藏暱稱」：勾 = 隱藏）。
+ * 舊欄有勾的 → 不隱藏；沒勾的（從沒審過）→ 隱藏，避免舊的未審內容突然出現。已經轉過就不動。
+ */
+function migrateLegacyColumn_(book, name, index, legacyHeader, newHeader) {
+  var sheet = book.getSheetByName(name);
+  if (!sheet || sheet.getRange(1, index + 1).getDisplayValue() !== legacyHeader) return;
+  var last = sheet.getLastRow();
+  if (last > 1) {
+    var range = sheet.getRange(2, index + 1, last - 1, 1);
+    range.setValues(range.getValues().map(function (row) { return [row[0] !== true]; }));
+  }
+  sheet.getRange(1, index + 1).setValue(newHeader);
+  SpreadsheetApp.flush();
+  console.log('「' + name + '」的「' + legacyHeader + '」已轉成「' + newHeader + '」，共 ' + Math.max(last - 1, 0) + ' 列。');
+}
+
+/** 「禁用字」分頁：A 欄一列一個詞。第一次建立時放預設清單；已經存在就不動（保留你加的詞）。 */
+function prepareBannedTab_(book) {
+  if (book.getSheetByName(BANNED_TAB)) return;
+  var sheet = book.insertSheet(BANNED_TAB);
+  sheet.getRange(1, 1, 1, 2).setValues([['禁用字', '說明']])
+    .setFontWeight('bold').setBackground(BRAND_COLOR).setFontColor('#ffffff');
+  sheet.getRange(2, 1, DEFAULT_BANNED_WORDS.length, 1).setNumberFormat('@')
+    .setValues(DEFAULT_BANNED_WORDS.map(function (word) { return [word]; }));
+  sheet.getRange(2, 2).setValue('A 欄一列一個詞，可自己增減。留言或暱稱裡出現（不分大小寫、會忽略空白和標點）就擋掉。');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidth(1, 160);
+  sheet.setColumnWidth(2, 520);
+}
+
+/**
  * 獨立的 Apps Script 專案收不到 onEdit，改建一個「編輯試算表時」的觸發條件來清快取，
- * 這樣勾「上牆」「不採用」「暱稱通過」「隱藏」後網站下一次讀就看得到。第一次建立時 Google 會要求多一項授權。
+ * 這樣勾「不採用」「隱藏」「隱藏暱稱」後網站下一次讀就看得到。第一次建立時 Google 會要求多一項授權。
  */
 function ensureEditTrigger_(book) {
   if (SpreadsheetApp.getActiveSpreadsheet()) return;
