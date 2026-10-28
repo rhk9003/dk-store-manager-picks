@@ -137,7 +137,7 @@ var RESIDENT_LOOK = {
   acc:['none','backpack','scarf','glasses'],
   shoe:['#2e2b2a','#f2efe8','#e2cba6','#8B2332','#9b9a98','#9a86c6','#5b80b8','#f1b6c4']
 };
-var RESIDENT_MODES = ['loop','north','central','south','east','street','mountain'];
+var RESIDENT_MODES = ['loop','north','central','south','east','street','mountain','lake'];
 var RESIDENT_LIMIT = 300;            // doGet 最多回傳幾個島民
 var RESIDENT_COOLDOWN_SECONDS = 30;  // 同一台裝置多久能再存一次角色
 var SUBMISSION_MEMORY_SECONDS = 21600;  // 島民角色沒有提交編號欄，用快取記住 6 小時內的提交結果來防重送

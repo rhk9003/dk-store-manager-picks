@@ -262,7 +262,7 @@ DK 台灣島的訪客可以捏一個氣球人放上島（造型和移動方式�
   "nickname": "選填，最多 10 字",
   "look": { "body": "d|k|e|c", "hat": "none|cap|beanie|straw|crown", "acc": "none|backpack|scarf|glasses",
             "shoe": "#2e2b2a|#f2efe8|#e2cba6|#8B2332|#9b9a98|#9a86c6|#5b80b8|#f1b6c4" },
-  "mode": "loop|north|central|south|east|street|mountain", "website": "", "version": "island-1" }
+  "mode": "loop|north|central|south|east|street|mountain|lake", "website": "", "version": "island-1" }
 ```
 
 - 成功回 `{"ok":true,"id":"角色ID","nicknamePending":false}`；暱稱直接公開，`nicknamePending` 固定是 `false`。
