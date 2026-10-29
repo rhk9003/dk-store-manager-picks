@@ -131,9 +131,16 @@ var TEXT_RULES = [
   [/(script|javascript:|onerror|onload|eval\(|&#|%3c)/i, '不能放程式碼或特殊符號（< > { } [ ] = 等）喔！'],
   [/@/, '不能放帳號或 email 喔！'],
   [/(\d[\s-]?){9,}/, '為了保護個資，不能留電話或一長串數字喔！'],
-  [/(.)\1{9,}/u, '不要洗版喔！']
+  [/(.)\1{9,}/u, '不要洗版喔！'],
+  // 「加 dkcs88」「ID：abc123」這種留帳號的寫法：英文開頭又帶數字的一串，或「加」後面接英數
+  [/(?<![a-z0-9])(?=[a-z0-9_.-]{4,})[a-z][a-z0-9_.-]*\d/i, '不能留聯絡方式或帳號喔！'],
+  [/加\s*(?=[a-z0-9_.-]*[a-z])[a-z0-9_.-]{4,}/i, '不能留聯絡方式或帳號喔！']
 ];
-var NICKNAME_RULE = [/(官方|客服|店長|管理員|admin|staff)/i, '暱稱不能用官方、客服、店長等字樣喔！'];
+// 防冒充客服詐騙：去掉空白標點後比對（和禁用字一樣），「加 賴」「L.I.N.E」「客-服」都擋得到。
+var SCAM_HARMLESS = /(online|deadline|airline|outline|linen)/g;
+var SCAM_RULE = [/(客服|官方|公告|專員|總部|系統通知|加賴|賴id|密賴|私賴|賴我|ㄌㄞ|line|微信|wechat|telegram|whatsapp|私訊|私聊|聯繫|聯絡|來電|電話|專線|扣款|退款|退費|匯款|轉帳|帳戶|帳號|分期|定期購|信用卡|卡號|atm|驗證碼|個資|加好友|加我)/,
+  '為了防詐騙，留言不能提到客服、官方、LINE、帳戶或付款喔！有問題請找官網客服。'];
+var NICKNAME_RULE = [/(官方|客服|店長|店員|門市|小編|專員|公告|總部|系統|管理員|admin|staff|dk|dr\.?kao|高博士)/i, '暱稱不能用 DK、官方、客服、門市、店長等字樣喔！'];
 // 比對禁用字前，去掉所有空白、標點和符號（避免「幹 你.娘」繞過）。
 var BANNED_SQUASH = /[\s\p{P}\p{S}]/gu;
 // 「禁用字」分頁第一次建立時放的預設清單；之後以分頁內容為準。
@@ -409,6 +416,7 @@ function publicText_(value, label, min, max, isNickname) {
   var check = text.normalize('NFKC');
   TEXT_RULES.forEach(function (rule) { if (rule[0].test(check)) publicError_(rule[1]); });
   if (isNickname && NICKNAME_RULE[0].test(check)) publicError_(NICKNAME_RULE[1]);
+  if (SCAM_RULE[0].test(check.toLowerCase().replace(SCAM_HARMLESS, '').replace(BANNED_SQUASH, ''))) publicError_(SCAM_RULE[1]);
   var squashed = check.toLowerCase().replace(BANNED_SQUASH, '');
   if (squashed && bannedWords_().some(function (word) { return squashed.indexOf(word) !== -1; })) {
     publicError_('有不適當的字，換個說法吧！');
