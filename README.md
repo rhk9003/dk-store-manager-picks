@@ -253,7 +253,7 @@ DK 台灣島的訪客可以捏一個氣球人放上島（造型和移動方式�
 
 ### 島民角色
 
-讀取：頂層 `residents` 是沒隱藏的島民，依更新時間新到舊最多 300 個；`nickname` 沒填或被勾「隱藏暱稱」時是空字串。不會回傳裝置代號。
+讀取：頂層 `residents` 是沒隱藏的島民，依更新時間新到舊最多 300 個；`nickname` 沒填或被勾「隱藏暱稱」時是空字串；`since` 是上島時間（台灣島用它算島民長多大）。不會回傳裝置代號。
 
 送出（同樣是 `POST <收件網址>`、`text/plain` 的 JSON）：
 
@@ -265,7 +265,8 @@ DK 台灣島的訪客可以捏一個氣球人放上島（造型和移動方式�
   "mode": "loop|north|central|south|east|street|mountain|lake", "website": "", "version": "island-1" }
 ```
 
-- 成功回 `{"ok":true,"id":"角色ID","nicknamePending":false}`；暱稱直接公開，`nicknamePending` 固定是 `false`。
+- 成功回 `{"ok":true,"id":"角色ID","nicknamePending":false,"since":"上島時間"}`；暱稱直接公開，`nicknamePending` 固定是 `false`。
+- 島民證（換手機時把島民接回來）不在這裡，是台灣島另外一個 Apps Script 專案（台灣島 repo 的 `apps-script/islander.gs`），不跟這裡的留言、存島民搶排隊。
 - 角色ID = `deviceId` 做 SHA-256 後十六進位的前 12 碼，網站可以用同樣算法認出「我的角色」。
 - 一台裝置只有一個角色，再送一次就是更新；同一個 `submissionId` 6 小時內重送會拿到同樣的回應。
 - 失敗回 `{"ok":false,"message":"…"}`，可以直接顯示給訪客。

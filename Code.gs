@@ -26,7 +26,8 @@
  *
  * doPost 島民角色格式：
  *   { role: "resident", submissionId, deviceId, nickname, look: {body, hat, acc, shoe}, mode, website, version }
- *   成功回 {ok:true, id:"角色ID", nicknamePending:false}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
+ *   成功回 {ok:true, id:"角色ID", nicknamePending:false, since:"上島時間"}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
+ *   島民證（換手機時把島民接回來）在另一個 Apps Script 專案，見台灣島 repo 的 apps-script/islander.gs。
  *
  * doGet 回傳格式（欄位名稱固定；之後只會增加欄位，不會改名或刪除）：
  *   {
@@ -59,7 +60,8 @@
  *     residents: [                                        // 沒隱藏的島民，依更新時間新到舊最多 300 個
  *       { id: "a1b2c3d4e5f6", look: {body:"k", hat:"cap", acc:"none", shoe:"#2e2b2a"},
  *         mode: "north", nickname: "",                    // 沒填或勾了「隱藏暱稱」時是空字串
- *         at: "2026-10-28T10:00:00+08:00" }               // 不會回傳裝置代號
+ *         at: "2026-10-28T10:00:00+08:00",                // 最後更新時間
+ *         since: "2026-10-28T10:00:00+08:00" }            // 上島時間；不會回傳裝置代號
  *     ]
  *   }
  *
@@ -481,6 +483,7 @@ function saveResident_(data) {
   for (var i = rows.length - 1; i >= 0; i--) if (String(rows[i][RESIDENT.deviceId]) === data.deviceId) { index = i; break; }
 
   var fields = [now, data.deviceId, data.nickname, data.look.body, data.look.hat, data.look.acc, data.look.shoe, data.mode, data.version];
+  var since = now;
   if (index === -1) {
     appendRow_(sheet, [id, now].concat(fields), 2);
     // 舊欄「暱稱通過」還沒轉換時要勾起來暱稱才會公開。
@@ -488,10 +491,12 @@ function saveResident_(data) {
   } else {
     writeCells_(sheet.getRange(index + 2, RESIDENT.updatedAt + 1, 1, fields.length), fields);
     SpreadsheetApp.flush();
+    if (rows[index][RESIDENT.createdAt] instanceof Date) since = rows[index][RESIDENT.createdAt];
   }
   clearCache_();
   cache.put(cooldownKey, '1', RESIDENT_COOLDOWN_SECONDS);
-  var result = {ok:true, id:id, nicknamePending:false};
+  // since = 上島時間（重存不會變，台灣島用它算島民長多大）
+  var result = {ok:true, id:id, nicknamePending:false, since:isoTime_(since)};
   cache.put(submissionKey, JSON.stringify(result), SUBMISSION_MEMORY_SECONDS);
   return result;
 }
@@ -638,7 +643,8 @@ function visibleResidents_() {
         look:{body:String(row[RESIDENT.body]), hat:String(row[RESIDENT.hat]), acc:String(row[RESIDENT.acc]), shoe:String(row[RESIDENT.shoe])},
         mode:String(row[RESIDENT.mode]),
         nickname:isHidden_(row[RESIDENT.nicknameHidden], tab.legacy) ? '' : cellText_(row[RESIDENT.nickname]),
-        at:isoTime_(row[RESIDENT.updatedAt])
+        at:isoTime_(row[RESIDENT.updatedAt]),
+        since:row[RESIDENT.createdAt] instanceof Date ? isoTime_(row[RESIDENT.createdAt]) : ''
       };
     });
 }
