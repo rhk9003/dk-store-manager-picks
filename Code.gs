@@ -19,6 +19,7 @@
  *   門市留言    台灣島上客人的留言，直接公開。最後一欄「隱藏」打勾 = 從該門市的留言牆拿掉。
  *   島民角色    台灣島訪客捏的氣球人，一台裝置一列。「隱藏暱稱」打勾 = 只拿掉名字；「隱藏」打勾 = 整個角色不出現。
  *   禁用字      A 欄一列一個詞，留言或暱稱裡出現就擋掉；可以自己增加。不會從網站讀到。
+ *   島民留言    台灣島上別人留給島民的話，直接公開（第一次有人留言時自動建立分頁）。「隱藏」打勾 = 拿掉。
  *
  * doPost 留言格式（台灣島送來，text/plain 的 JSON）：
  *   { role: "message", submissionId, storeId, nickname, text, deviceId, website, version }
@@ -28,6 +29,13 @@
  *   { role: "resident", submissionId, deviceId, nickname, look: {body, hat, acc, shoe}, mode, website, version }
  *   成功回 {ok:true, id:"角色ID", nicknamePending:false, since:"上島時間"}。角色ID = deviceId 的 SHA-256 十六進位前 12 碼。
  *   島民證（換手機時把島民接回來）在另一個 Apps Script 專案，見台灣島 repo 的 apps-script/islander.gs。
+ *
+ * doPost 島民留言（點開別人的島民留言給他）：
+ *   { role: "resident-note", submissionId, residentId, nickname, text, deviceId, website, version }
+ *   → 在「島民留言」分頁新增一列，通過文字規則就直接公開（規則和門市留言一樣）。成功回 {ok:true, note:{id, nickname, text, at}}。
+ *   { role: "resident-note-hide", submissionId, noteId, deviceId, version }
+ *   → 島民的主人把自己島民收到的某則留言隱藏（裝置代號要對得上那個島民）。
+ * doGet?resident=角色ID：那個島民沒被隱藏的留言，新到舊最多 20 則 → {ok:true, resident, notes:[{id, nickname, text, at}]}
  *
  * doGet 回傳格式（欄位名稱固定；之後只會增加欄位，不會改名或刪除）：
  *   {
@@ -76,6 +84,7 @@ var RECORD_TAB = '填寫紀錄';
 var SUGGESTION_TAB = '同仁建議';
 var MESSAGE_TAB = '門市留言';
 var RESIDENT_TAB = '島民角色';
+var NOTE_TAB = '島民留言';
 var BANNED_TAB = '禁用字';
 
 // 從試算表「擴充功能 → Apps Script」建立的專案會自動找到那份試算表，這裡留空即可。
@@ -98,6 +107,10 @@ var MESSAGE_HEADERS = ['提交編號','送出時間','門市ID','門市名稱','
 var MESSAGE = {submissionId:0, submittedAt:1, storeId:2, storeName:3, nickname:4, text:5, version:6, hidden:7};
 var RESIDENT_HEADERS = ['角色ID','建立時間','更新時間','裝置代號','暱稱','身體','帽子','配件','鞋色','移動模式','版本','隱藏暱稱','隱藏'];
 var RESIDENT = {id:0, createdAt:1, updatedAt:2, deviceId:3, nickname:4, body:5, hat:6, acc:7, shoe:8, mode:9, version:10, nicknameHidden:11, hidden:12};
+var NOTE_HEADERS = ['提交編號','送出時間','角色ID','暱稱','留言','留言者裝置','版本','隱藏'];
+var NOTE = {submissionId:0, submittedAt:1, residentId:2, nickname:3, text:4, deviceId:5, version:6, hidden:7};
+var NOTE_WALL_SIZE = 20;          // 每個島民最多回傳幾則留言
+var NOTE_CACHE_SECONDS = 120;     // 島民留言的讀取快取；有人留言、隱藏或手動改試算表時立刻失效
 // 先審制時期的舊欄名（勾 = 公開）。新版程式兩種都看得懂，setupSheet 會把舊欄轉成新欄（勾 = 隱藏）。
 var LEGACY_MESSAGE_HEADER = '上牆';
 var LEGACY_RESIDENT_HEADER = '暱稱通過';
@@ -216,8 +229,11 @@ var STORES = [
 
 /* ---------- 網頁進入點 ---------- */
 
-function doGet() {
+function doGet(event) {
   try {
+    // ?resident=角色ID：只讀那個島民的留言（點開島民名片時才讀，不放進整包資料）
+    var resident = event && event.parameter && event.parameter.resident;
+    if (resident) return jsonResponse_(residentNotes_(String(resident)));
     var json = readCache_();
     if (!json) {
       json = JSON.stringify(buildLatest_());
@@ -240,6 +256,7 @@ function doPost(event) {
     // 隱藏欄位被填 = 機器人，假裝成功但不寫入。
     if (data && typeof data.website === 'string' && data.website) {
       if (data.role === 'message') return jsonResponse_({ok:true, published:true, pending:false});
+      if (data.role === 'resident-note') return jsonResponse_({ok:true, note:null});
       if (data.role === 'resident') {
         var botDevice = typeof data.deviceId === 'string' && /^[A-Za-z0-9_-]{16,40}$/.test(data.deviceId);
         return jsonResponse_({ok:true, id:botDevice ? residentId_(data.deviceId) : '', nicknamePending:false});
@@ -250,6 +267,8 @@ function doPost(event) {
     lock = LockService.getScriptLock();
     if (!lock.tryLock(10000)) publicError_('目前送出的人比較多，請稍後再按一次。');
     var result = valid.role === 'resident' ? saveResident_(valid)
+      : valid.role === 'resident-note' ? appendResidentNote_(valid)
+      : valid.role === 'resident-note-hide' ? hideResidentNote_(valid)
       : valid.role === 'message' ? appendMessage_(valid)
       : valid.role === 'staff' ? appendSuggestion_(valid) : appendRecord_(valid);
     return jsonResponse_(result);
@@ -298,6 +317,25 @@ function validatePayload_(data) {
         shoe:pickOption_(look.shoe, RESIDENT_LOOK.shoe, '鞋子顏色')
       },
       mode:pickOption_(data.mode, RESIDENT_MODES, '移動方式'),
+      version:version
+    };
+  }
+
+  if (data.role === 'resident-note' || data.role === 'resident-note-hide') {
+    var noteDevice = cleanText_(data.deviceId, 40, true, '裝置識別碼');
+    if (!/^[A-Za-z0-9_-]{16,40}$/.test(noteDevice)) publicError_('裝置識別碼不正確，請重新整理後再試。');
+    if (data.role === 'resident-note-hide') {
+      return {role:'resident-note-hide', submissionId:submissionId, deviceId:noteDevice, noteId:cleanText_(data.noteId, 80, true, '留言'), version:version};
+    }
+    var target = cleanText_(data.residentId, 64, true, '島民');
+    if (!/^[0-9a-f]{12}$/.test(target)) publicError_('找不到這個島民，請重新整理後再試。');
+    return {
+      role:'resident-note',
+      submissionId:submissionId,
+      residentId:target,
+      deviceId:noteDevice,
+      nickname:publicText_(data.nickname, '暱稱', 0, LIMITS.nickname, true) || DEFAULT_NICKNAME,
+      text:publicText_(data.text, '留言', MESSAGE_MIN_CHARS, LIMITS.message, false),
       version:version
     };
   }
@@ -459,6 +497,75 @@ function appendMessage_(data) {
   cache.put(cooldownKey, '1', MESSAGE_COOLDOWN_SECONDS);
   clearCache_();
   return {ok:true, published:true, pending:false};
+}
+
+/** 島民留言：通過文字規則就直接公開；同一台裝置 30 秒內只能留一則。 */
+function appendResidentNote_(data) {
+  var sheet = noteTab_();
+  if (hasSubmission_(sheet, data.submissionId)) return {ok:true, duplicate:true, note:null};
+  var cache = CacheService.getScriptCache();
+  var cooldownKey = 'note-device:' + data.deviceId;
+  if (cache.get(cooldownKey)) publicError_('留言太快了，休息一下再留吧！');
+  var now = new Date();
+  appendRow_(sheet, [data.submissionId, now, data.residentId, data.nickname, data.text, data.deviceId, data.version]);
+  cache.put(cooldownKey, '1', MESSAGE_COOLDOWN_SECONDS);
+  bumpNotes_();
+  return {ok:true, note:{id:data.submissionId, nickname:data.nickname, text:data.text, at:isoTime_(now)}};
+}
+
+/** 島民的主人隱藏自己島民收到的留言：裝置代號算出來的角色ID 要和留言的島民一樣。 */
+function hideResidentNote_(data) {
+  var sheet = noteTab_();
+  var owner = residentId_(data.deviceId);
+  var last = sheet.getLastRow();
+  var rows = last > 1 ? sheet.getRange(2, 1, last - 1, NOTE_HEADERS.length).getValues() : [];
+  for (var i = rows.length - 1; i >= 0; i--) {
+    if (String(rows[i][NOTE.submissionId]) !== data.noteId) continue;
+    if (String(rows[i][NOTE.residentId]) !== owner) publicError_('只有島民的主人可以隱藏這則留言。');
+    sheet.getRange(i + 2, NOTE.hidden + 1).setValue(true);
+    bumpNotes_();
+    return {ok:true};
+  }
+  publicError_('找不到這則留言，可能已經拿掉了。');
+}
+
+/** 「島民留言」分頁；第一次有人留言時自動建立（不用重跑 setupSheet）。 */
+function noteTab_() {
+  var book = book_();
+  if (book.getSheetByName(NOTE_TAB)) return openTab_(NOTE_TAB, NOTE_HEADERS);
+  var sheet = book.insertSheet(NOTE_TAB);
+  writeCells_(sheet.getRange(1, 1, 1, NOTE_HEADERS.length), NOTE_HEADERS);
+  sheet.getRange(1, 1, 1, NOTE_HEADERS.length).setFontWeight('bold').setBackground('#f3e6e8');
+  sheet.setFrozenRows(1);
+  [150, 150, 110, 110, 380, 180, 90, 60].forEach(function (w, i) { sheet.setColumnWidth(i + 1, w); });
+  return sheet;
+}
+
+/** 讀某個島民沒被隱藏的留言（快取 2 分鐘；有人留言、隱藏或手動改試算表時換新的版本號，舊快取就不用了）。 */
+function residentNotes_(id) {
+  if (!/^[0-9a-f]{12}$/.test(id)) return {ok:false, message:'找不到這個島民。'};
+  var cache = CacheService.getScriptCache();
+  var key = 'notes:' + (cache.get('notes-version') || '0') + ':' + id;
+  var cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+  var notes = [];
+  var sheet = book_().getSheetByName(NOTE_TAB);
+  if (sheet && sheet.getLastRow() > 1) {
+    notes = sheet.getRange(2, 1, sheet.getLastRow() - 1, NOTE_HEADERS.length).getValues()
+      .filter(function (row) { return String(row[NOTE.residentId]) === id && row[NOTE.hidden] !== true && row[NOTE.submittedAt] instanceof Date; })
+      .sort(function (a, b) { return b[NOTE.submittedAt] - a[NOTE.submittedAt]; })
+      .slice(0, NOTE_WALL_SIZE)
+      .map(function (row) {
+        return {id:String(row[NOTE.submissionId]), nickname:cellText_(row[NOTE.nickname]), text:cellText_(row[NOTE.text]), at:isoTime_(row[NOTE.submittedAt])};
+      });
+  }
+  var result = {ok:true, resident:id, notes:notes};
+  try { cache.put(key, JSON.stringify(result), NOTE_CACHE_SECONDS); } catch (_) { /* 快取失敗就下次再讀 */ }
+  return result;
+}
+
+function bumpNotes_() {
+  CacheService.getScriptCache().put('notes-version', String(Date.now()), 21600);
 }
 
 /**
@@ -734,6 +841,7 @@ function writeCache_(json) {
 
 function clearCache_() {
   CacheService.getScriptCache().removeAll(cacheKeys_());
+  bumpNotes_(); // 島民留言的快取跟著失效（例如在試算表勾了「隱藏」）
 }
 
 
